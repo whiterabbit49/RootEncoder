@@ -88,7 +88,7 @@ class SrtStream(
       // measure ingest latency. Inserted before the first VCL NAL (SPS/PPS -> SEI -> VCL order).
       // Recording taps getVideoData before this, so local recordings stay free of the SEI.
       // Format mirrors crates/common/src/sei.rs (UUID b7c1f2a0-4e83-4d67-9b01-c3a5de120001 + f64 BE seconds).
-      val sei = TrackcastSei.buildAvcc(System.currentTimeMillis())
+      val sei = TrackcastSei.build(System.currentTimeMillis())
       val (out, newInfo) = injectSeiBeforeVcl(videoBuffer, info, sei)
       srtClient.sendVideo(out, newInfo)
     } else {
@@ -97,8 +97,10 @@ class SrtStream(
   }
 
   /**
-   * Insert [sei] (an AVCC NAL: 4-byte BE length + body) into the access unit in [videoBuffer]
+   * Insert [sei] (an Annex-B NAL: 00 00 00 01 + body) into the access unit in [videoBuffer]
    * just before the first VCL NAL (nal_type 1 or 5), preserving SPS/PPS -> SEI -> VCL order.
+   * The buffer is Annex-B (start-code-prefixed NALs), matching RootEncoder's H26XPacket; the
+   * earlier AVCC injection mis-parsed it and overflowed the TS packetizer (H26XPacket.fixHeader).
    * Returns a fresh (ByteBuffer, BufferInfo) with the updated size. Uses a duplicate() view so
    * the original buffer's position is untouched (it is recycled by the encoder after this call).
    */
@@ -109,18 +111,24 @@ class SrtStream(
     view.position(info.offset)
     val frame = ByteArray(info.size)
     view.get(frame)
+    // Scan Annex-B start codes (00 00 00 01 / 00 00 01); find the first VCL NAL (type 1 or 5);
+    // insert the SEI before that NAL's start code.
     var insertAt = 0
-    var pos = 0
-    while (pos + 4 <= frame.size) {
-      val b0 = frame[pos].toInt() and 0xFF
-      val b1 = frame[pos + 1].toInt() and 0xFF
-      val b2 = frame[pos + 2].toInt() and 0xFF
-      val b3 = frame[pos + 3].toInt() and 0xFF
-      val len = (b0 shl 24) or (b1 shl 16) or (b2 shl 8) or b3
-      if (len <= 0 || pos + 4 + len > frame.size) break  // malformed; fall back to prepend
-      val nalType = frame[pos + 4].toInt() and 0x1F
-      if (nalType == 1 || nalType == 5) { insertAt = pos; break }
-      pos += 4 + len
+    var i = 0
+    while (i + 3 <= frame.size) {
+      val sc4 = i + 4 <= frame.size && frame[i].toInt() == 0 && frame[i + 1].toInt() == 0 &&
+        frame[i + 2].toInt() == 0 && frame[i + 3].toInt() == 1
+      val sc3 = frame[i].toInt() == 0 && frame[i + 1].toInt() == 0 && frame[i + 2].toInt() == 1
+      if (sc4 || sc3) {
+        val hdr = i + if (sc4) 4 else 3
+        if (hdr < frame.size) {
+          val nalType = frame[hdr].toInt() and 0x1F
+          if (nalType == 1 || nalType == 5) { insertAt = i; break }
+        }
+        i = hdr
+      } else {
+        i += 1
+      }
     }
     val out = ByteBuffer.allocate(sei.size + frame.size)
     out.put(frame, 0, insertAt)
@@ -132,7 +140,7 @@ class SrtStream(
     return out to newInfo
   }
 
-  /** Builds the trackcast latency SEI NAL in AVCC form. Mirrors crates/common/src/sei.rs. */
+  /** Builds the trackcast latency SEI NAL in Annex-B form. Mirrors crates/common/src/sei.rs build_sei_nal. */
   private object TrackcastSei {
     private val UUID = byteArrayOf(
       0xb7.toByte(), 0xc1.toByte(), 0xf2.toByte(), 0xa0.toByte(),
@@ -141,11 +149,11 @@ class SrtStream(
       0xde.toByte(), 0x12.toByte(), 0x00.toByte(), 0x01.toByte()
     )
 
-    /** AVCC NAL: 4-byte BE length + SEI body (06 05 18 UUID(16) f64-BE-seconds(8) 80) = 32 bytes. */
-    fun buildAvcc(epochMs: Long): ByteArray {
+    /** Annex-B NAL: start code(4) + SEI body (06 05 18 UUID(16) f64-BE-seconds(8) 80) = 32 bytes. */
+    fun build(epochMs: Long): ByteArray {
       val out = ByteArray(32)
       val bb = ByteBuffer.wrap(out)
-      bb.putInt(28)                                    // AVCC length prefix
+      bb.put(byteArrayOf(0, 0, 0, 1))                  // Annex-B start code
       bb.put(0x06.toByte())                            // nal_unit_type = 6 (SEI)
       bb.put(0x05.toByte())                            // sei_message_type = 5 (user_data_unregistered)
       bb.put(0x18.toByte())                            // payload size = 24

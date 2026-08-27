@@ -28,6 +28,7 @@ import com.pedro.encoder.input.sources.audio.MicrophoneSource
 import com.pedro.encoder.input.sources.video.Camera2Source
 import com.pedro.encoder.input.sources.video.VideoSource
 import com.pedro.library.base.StreamBase
+import com.pedro.library.util.TrackcastSei
 import com.pedro.library.util.streamclient.StreamClientListener
 import com.pedro.library.util.streamclient.WhipStreamClient
 import com.pedro.whip.WhipClient
@@ -87,7 +88,16 @@ class WhipStream(
   }
 
   override fun getVideoDataImp(videoBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
-    whipClient.sendVideo(videoBuffer, info)
+    if ((info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0) {
+      // trackcast latency SEI (shared helper; see TrackcastSei): injected on
+      // each IDR here so local recordings, tapped upstream, stay SEI-free.
+      val (out, newInfo) = TrackcastSei.injectBeforeVcl(
+        videoBuffer, info, TrackcastSei.build(System.currentTimeMillis())
+      )
+      whipClient.sendVideo(out, newInfo)
+    } else {
+      whipClient.sendVideo(videoBuffer, info)
+    }
   }
 
   override fun getAudioDataImp(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {

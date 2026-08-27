@@ -70,7 +70,10 @@ class CameraXSource(
   private var fingerSpacing = 0f
   private var requiredSize: Size? = null
 
-  override fun getLifecycle(): Lifecycle = lifecycleRegistry
+  // androidx.lifecycle 2.9 Kotlin-ized LifecycleOwner: the accessor is a
+  // property (val lifecycle), not the Java-style getLifecycle() method.
+  override val lifecycle: Lifecycle
+    get() = lifecycleRegistry
 
   override fun create(width: Int, height: Int, fps: Int, rotation: Int): Boolean {
     val facing = if (facing == CameraSelector.LENS_FACING_BACK) CameraHelper.Facing.BACK else CameraHelper.Facing.FRONT

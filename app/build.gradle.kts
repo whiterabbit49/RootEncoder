@@ -5,12 +5,12 @@ plugins {
 
 android {
   namespace = "com.pedro.streamer"
-  compileSdk = 37
+  compileSdk = 36
 
   defaultConfig {
     applicationId = "com.pedro.streamer"
     minSdk = 16
-    targetSdk = 37
+    targetSdk = 36
     versionCode = project.version.toString().replace(".", "").toInt()
     versionName = project.version.toString()
     multiDexEnabled = true

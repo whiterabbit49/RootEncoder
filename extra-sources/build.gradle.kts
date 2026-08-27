@@ -1,5 +1,6 @@
 plugins {
     alias(libs.plugins.android.library)
+    alias(libs.plugins.jetbrains.kotlin)
     alias(libs.plugins.jetbrains.dokka)
     `maven-publish`
 }
@@ -21,13 +22,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    kotlin {
+        jvmToolchain(17)
+    }
     publishing {
         singleVariant("release")
     }
-}
-
-kotlin {
-    jvmToolchain(17)
 }
 
 afterEvaluate {

@@ -73,16 +73,33 @@ abstract class StreamBase(
   private val getMicrophoneData = object: GetMicrophoneData {
     override fun inputPCMData(frame: Frame) {
       audioEncoder.inputPCMData(frame)
+      // trackcast: with a separate record audio codec, the record encoder dequeues on
+      // its own thread at a different time, so hand it a private copy of the PCM (the
+      // mic thread reuses frame.buffer for the next read).
+      if (recordAudioCodec != null) {
+        val copy = ByteArray(frame.size)
+        System.arraycopy(frame.buffer, frame.offset, copy, 0, frame.size)
+        audioEncoderRecord.inputPCMData(Frame(copy, 0, copy.size, frame.timeStamp))
+      }
     }
   }
   //video and audio encoders
   private val videoEncoder by lazy { VideoEncoder(getVideoData) }
   private val videoEncoderRecord by lazy { VideoEncoder(getVideoDataRecord) }
   private val audioEncoder by lazy { AudioEncoder(getAacData) }
+  // trackcast: second audio encoder dedicated to recording. Only used when the record
+  // audio codec differs from the stream audio codec (see setRecordAudioCodec); the
+  // instance itself is inert unless prepared/started.
+  private val audioEncoderRecord by lazy { AudioEncoder(getAacDataRecord) }
   //video render
   private val glInterface = GlStreamInterface(context)
   //video/audio record
   private var recordController: RecordController = AndroidMuxerRecordController()
+  // trackcast: codec used for the LOCAL RECORDING audio track when it must differ from
+  // the streamed audio codec (e.g. stream Opus for browsers, record AAC for MP4).
+  // null (default) = record the stream codec, which is upstream behavior.
+  private var recordAudioCodec: AudioCodec? = null
+  private var audioCodec: AudioCodec? = null
   private val fpsListener = FpsListener()
   var isStreaming = false
     private set
@@ -172,7 +189,13 @@ abstract class StreamBase(
     val audioResult = audioSource.init(sampleRate, isStereo, echoCanceler, noiseSuppressor)
     if (audioResult) {
       onAudioInfoImp(sampleRate, isStereo)
-      return audioEncoder.prepareAudioEncoder(bitrate, sampleRate, isStereo)
+      val streamResult = audioEncoder.prepareAudioEncoder(bitrate, sampleRate, isStereo)
+      // trackcast: prepare the dedicated record encoder with the same PCM format. It is
+      // expected to be AAC (MP4 muxer requirement); the mime was set by setRecordAudioCodec.
+      val recordResult = if (recordAudioCodec != null) {
+        audioEncoderRecord.prepareAudioEncoder(bitrate, sampleRate, isStereo)
+      } else true
+      return streamResult && recordResult
     }
     return false
   }
@@ -233,6 +256,7 @@ abstract class StreamBase(
     videoEncoder.forceCodecType(codecTypeVideo)
     videoEncoderRecord.forceCodecType(codecTypeVideo)
     audioEncoder.forceCodecType(codecTypeAudio)
+    if (recordAudioCodec != null) audioEncoderRecord.forceCodecType(codecTypeAudio)
   }
 
   /**
@@ -442,6 +466,7 @@ abstract class StreamBase(
     videoEncoder.setTimestampMode(timestampModeVideo)
     videoEncoderRecord.setTimestampMode(timestampModeVideo)
     audioEncoder.setTimestampMode(timestampModeAudio)
+    if (recordAudioCodec != null) audioEncoderRecord.setTimestampMode(timestampModeAudio)
   }
 
   /**
@@ -452,6 +477,7 @@ abstract class StreamBase(
     videoEncoder.setEncoderErrorCallback(encoderErrorCallback)
     videoEncoderRecord.setEncoderErrorCallback(encoderErrorCallback)
     audioEncoder.setEncoderErrorCallback(encoderErrorCallback)
+    if (recordAudioCodec != null) audioEncoderRecord.setEncoderErrorCallback(encoderErrorCallback)
   }
 
   fun forceBt709Color(enabled: Boolean) {
@@ -517,6 +543,9 @@ abstract class StreamBase(
     videoEncoder.start(startTs)
     if (differentRecordResolution) videoEncoderRecord.start(startTs)
     audioEncoder.start(startTs)
+    // trackcast: with a separate record codec the record encoder must capture PCM even
+    // when only streaming (recording can start later and rotated in segments).
+    if (recordAudioCodec != null) audioEncoderRecord.start(startTs)
     glInterface.addMediaCodecSurface(videoEncoder.inputSurface)
     if (differentRecordResolution) glInterface.addMediaCodecRecordSurface(videoEncoderRecord.inputSurface)
   }
@@ -530,6 +559,7 @@ abstract class StreamBase(
     videoEncoder.stop()
     videoEncoderRecord.stop()
     audioEncoder.stop()
+    if (recordAudioCodec != null) audioEncoderRecord.stop()
     if (!isRecording) recordController.resetFormats()
   }
 
@@ -578,12 +608,31 @@ abstract class StreamBase(
       val result = videoEncoderRecord.prepareVideoEncoder()
       if (!result) return false
     }
+    // trackcast: re-prepare the dedicated record encoder alongside the stream encoders.
+    if (recordAudioCodec != null) {
+      val result = audioEncoderRecord.prepareAudioEncoder()
+      if (!result) return false
+    }
     return videoEncoder.prepareVideoEncoder() && audioEncoder.prepareAudioEncoder()
   }
 
   private val getAacData: GetAudioData = object : GetAudioData {
     override fun getAudioData(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
       getAudioDataImp(audioBuffer, info)
+      // trackcast: in dual-codec mode the record track is fed by audioEncoderRecord,
+      // so the stream encoder output must not also land in the record controller.
+      if (recordAudioCodec == null) recordController.recordAudio(audioBuffer, info)
+    }
+
+    override fun onAudioFormat(mediaFormat: MediaFormat) {
+      if (recordAudioCodec == null) recordController.setAudioFormat(mediaFormat)
+    }
+  }
+
+  // trackcast: output of the dedicated record audio encoder. Feeds ONLY the record
+  // controller (never the stream client).
+  private val getAacDataRecord: GetAudioData = object : GetAudioData {
+    override fun getAudioData(audioBuffer: ByteBuffer, info: MediaCodec.BufferInfo) {
       recordController.recordAudio(audioBuffer, info)
     }
 
@@ -651,16 +700,47 @@ abstract class StreamBase(
   /**
    * Change AudioCodec used.
    * This could fail depend of the Codec supported in each Protocol. For example G711 is not supported in SRT
+   *
+   * trackcast: when [setRecordAudioCodec] set a dedicated record codec, the record
+   * controller keeps that codec instead of the stream codec.
    */
   fun setAudioCodec(codec: AudioCodec) {
     setAudioCodecImp(codec)
-    recordController.setAudioCodec(codec)
+    audioCodec = codec
+    recordController.setAudioCodec(recordAudioCodec ?: codec)
     val type = when (codec) {
       AudioCodec.G711 -> CodecUtil.G711_MIME
       AudioCodec.AAC -> CodecUtil.AAC_MIME
       AudioCodec.OPUS -> CodecUtil.OPUS_MIME
     }
     audioEncoder.type = type
+  }
+
+  /**
+   * trackcast: use a dedicated audio codec for the LOCAL RECORDING while streaming a
+   * different one. The recording gets its own encoder instance fed by the same PCM,
+   * so the stream encoder output no longer lands in the record controller.
+   *
+   * Call AFTER [setAudioCodec] (it re-propagates the record codec to the record
+   * controller) and BEFORE prepareAudio (the record encoder is prepared there).
+   * The MP4 muxer only supports AAC, so [AndroidMuxerRecordController] will still
+   * reject unsupported codecs at startRecord time.
+   *
+   * Pass null to restore upstream behavior (record the stream codec).
+   */
+  fun setRecordAudioCodec(codec: AudioCodec?) {
+    if (isRecording) {
+      throw IllegalStateException("Record already started, stopRecord before changing the record audio codec")
+    }
+    recordAudioCodec = codec
+    recordController.setAudioCodec(codec ?: audioCodec ?: AudioCodec.AAC)
+    if (codec != null) {
+      audioEncoderRecord.type = when (codec) {
+        AudioCodec.G711 -> CodecUtil.G711_MIME
+        AudioCodec.AAC -> CodecUtil.AAC_MIME
+        AudioCodec.OPUS -> CodecUtil.OPUS_MIME
+      }
+    }
   }
 
   protected abstract fun setVideoCodecImp(codec: VideoCodec)

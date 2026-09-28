@@ -42,8 +42,13 @@ object SdpParser {
     return sdp.lines()
       .map { it.trim() }.filter { it.startsWith(prefix, ignoreCase = true) }
       .map { it.removePrefix(prefix) }.mapNotNull { candidateText ->
-        val values = candidateText.split(" ")
-        if (values.size >= 8) {
+        // trackcast: one malformed line must not abort the whole answer —
+        // servers append extensions (e.g. MediaMTX appends `ufrag <ufrag>`,
+        // TCP lines also carry `tcptype <type>`), which misalign fixed indices
+        // (NumberFormatException on the ufrag token killed every WHIP publish).
+        runCatching {
+          val values = candidateText.split(" ")
+          if (values.size < 8) return@runCatching null
           val protocol = values[1].toInt() // 1 SRTP, 2 SRTCP
           val priority = values[3].toInt()
           val address = values[4]
@@ -51,14 +56,17 @@ object SdpParser {
           val candidateTypeText = values[7]
           val type = CandidateType.entries.find { it.value == candidateTypeText }
             ?: throw IllegalArgumentException("Unknown candidate type: $candidateTypeText")
-          if (values.size >= 11) {
-            val localAddress = values[9]
-            val localPort = values[11].toInt()
+          // trackcast: locate raddr/rport by key, not position.
+          val raddrIndex = values.indexOf("raddr")
+          val rportIndex = values.indexOf("rport")
+          val localAddress = values.getOrNull(raddrIndex + 1).takeIf { raddrIndex >= 0 }
+          val localPort = values.getOrNull(rportIndex + 1)?.toIntOrNull().takeIf { rportIndex >= 0 }
+          if (localAddress != null && localPort != null) {
             Candidate(type, protocol, priority, localAddress, localPort, address, port)
           } else {
             Candidate(type, protocol, priority, address, port, null, null)
           }
-        } else null
+        }.getOrNull()
       }
   }
 }

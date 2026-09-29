@@ -21,6 +21,7 @@ import com.pedro.whip.dtls.DtlsConnection
 import com.pedro.whip.dtls.DtlsTransport
 import com.pedro.whip.webrtc.CandidateType
 import com.pedro.whip.webrtc.CommandsManager
+import com.pedro.whip.webrtc.selectRemoteCandidate
 import com.pedro.whip.webrtc.stun.AttributeType
 import com.pedro.whip.webrtc.stun.GatheringMode
 import com.pedro.whip.webrtc.stun.HeaderType
@@ -262,8 +263,11 @@ class WhipClient(private val connectChecker: ConnectChecker) {
                         it.getRealHost() != "127.0.0.1"
                     } ?: return@launch
 
-                    val host = remoteCandidates[0].getRealHost()
-                    val port = remoteCandidates[0].getRealPort()
+                    // trackcast: don't blindly take [0] — servers behind NAT list
+                    // unreachable private addresses first (pod IP); prefer public.
+                    val selected = selectRemoteCandidate(remoteCandidates) ?: return@launch
+                    val host = selected.getRealHost()
+                    val port = selected.getRealPort()
                     val socket = StreamSocket.createUdpSocket(socketType, host, port, socketTimeout, receiveSize = RtpConstants.MTU)
                     socket.connect()
 

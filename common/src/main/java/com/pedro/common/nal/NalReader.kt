@@ -65,8 +65,13 @@ object NalReader {
   private fun shouldKeepNal(nal: ByteBuffer, codec: VideoCodec, shouldDiscardVideoInfo: Boolean): Boolean {
     return when (codec) {
       VideoCodec.H264 -> {
+        // trackcast: SEI (type 6) is KEPT — the latency SEI injected per-IDR by
+        // TrackcastSei (WhipStream/SrtStream) must reach trackcast-latency-rx.
+        // Upstream discarded it here, so the injected SEI never left the phone
+        // on the RTP path (SRT/TS packetization bypasses this filter, which is
+        // why SRT-era ingest latency worked). AUD (type 9) stays discarded.
         val type = (nal.get(0) and 0x1F).toInt()
-        !(type == H264_SEI || type == H264_AUD ||
+        !(type == H264_AUD ||
             (shouldDiscardVideoInfo && (type == H264_SPS || type == H264_PPS)))
       }
       VideoCodec.H265 -> {

@@ -229,7 +229,13 @@ class WhipClient(private val connectChecker: ConnectChecker) {
 
                     val localCandidates = commandsManager.gatheringCandidates(socketType, socketTimeout, GatheringMode.LOCAL)
                     Log.i(TAG, "found ${localCandidates.size} candidates")
-                    val offerResponse = commandsManager.writeOffer()
+                    // trackcast: send the Authorization header on the initial offer when a
+                    // token is set — auth-enforcing servers (MediaMTX) reject the anonymous
+                    // offer first (one wasted round trip per START) and 3xx/5xx answers
+                    // would never see the token at all.
+                    val offerResponse = commandsManager.writeOffer(
+                        sendAuth = !commandsManager.token.isNullOrEmpty()
+                    )
                     Log.i(TAG, offerResponse.toString())
                     if (offerResponse.statusCode !in 200..299) {
                         val needAuth = offerResponse.statusCode in 400..499
